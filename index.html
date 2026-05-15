@@ -312,11 +312,63 @@
       position: absolute;
       bottom: 0; left: 0; right: 0;
       display: flex;
+      flex-direction: column;
       align-items: center;
-      justify-content: center;
-      padding: 20px;
+      padding: 12px 16px 20px;
       gap: 10px;
+      background: linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 100%);
     }
+    .vr-ctrl-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      max-width: 700px;
+    }
+    /* seek bar */
+    #vr-seek {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(255,255,255,0.25);
+      outline: none;
+      cursor: pointer;
+      position: relative;
+    }
+    #vr-seek::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 6px rgba(0,0,0,0.5);
+      cursor: pointer;
+    }
+    #vr-seek::-webkit-slider-runnable-track {
+      border-radius: 3px;
+    }
+    .vr-time {
+      font-size: 12px;
+      color: rgba(255,255,255,0.8);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+      min-width: 80px;
+      text-align: center;
+    }
+    .vr-play-btn {
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.15);
+      border: 1.5px solid rgba(255,255,255,0.4);
+      color: #fff;
+      font-size: 18px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      pointer-events: all;
+    }
+    .vr-play-btn:active { opacity: 0.6; }
 
     /* ── Loading ── */
     #loading {
@@ -843,9 +895,16 @@
     <div class="vr-hud-top">
       <button class="vr-hud-btn exit" id="vr-exit-btn">✕ 退出</button>
       <button class="vr-hud-btn" id="vr-gyro-btn">📱 陀螺儀</button>
+      <button class="vr-hud-btn" id="vr-reset-btn">↺ 重設視角</button>
     </div>
     <div class="vr-hud-bottom">
-      <button class="vr-hud-btn" id="vr-reset-btn">↺ 重設視角</button>
+      <!-- Video controls (only shown for direct video) -->
+      <div class="vr-ctrl-row" id="vr-video-ctrl" style="display:none;">
+        <button class="vr-play-btn" id="vr-play-btn">⏸</button>
+        <span class="vr-time" id="vr-cur-time">0:00</span>
+        <input type="range" id="vr-seek" min="0" max="100" value="0" step="0.1">
+        <span class="vr-time" id="vr-dur-time">0:00</span>
+      </div>
     </div>
   </div>
 </div>
@@ -1653,10 +1712,13 @@ async function enterVR() {
   }
 
   updateGyroBtn();
-  toast('雙擊螢幕隱藏/顯示控制列', 3500);
+  // Start video controls after a short delay (let video load first)
+  setTimeout(startVideoControls, 800);
+  toast('雙擊螢幕 隱藏/顯示控制列', 3000);
 }
 
 function exitVR() {
+  stopVideoControls();
   if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
   stopGyro();
 
@@ -1698,7 +1760,9 @@ vrScreen.addEventListener('touchend', () => { dragState = null; }, { passive: tr
 
 // Double-tap to toggle HUD
 let lastTap = 0;
-vrScreen.addEventListener('touchend', () => {
+vrScreen.addEventListener('touchend', (e) => {
+  // Ignore taps on HUD buttons or seek bar
+  if (e.target.closest('#vr-hud')) return;
   const now = Date.now();
   if (now - lastTap < 300) {
     S.hudVisible = !S.hudVisible;
@@ -1741,6 +1805,82 @@ function updateGyroBtn() {
     btn.classList.remove('on');
   }
 }
+
+/* ═══════════════════════════════════════════════
+   VR Video Controls
+═══════════════════════════════════════════════ */
+const vrVideoCtrl = $('vr-video-ctrl');
+const vrSeek      = $('vr-seek');
+const vrCurTime   = $('vr-cur-time');
+const vrDurTime   = $('vr-dur-time');
+const vrPlayBtn   = $('vr-play-btn');
+
+let ctrlInterval = null;
+let isSeeking = false;
+
+function fmtTime(s) {
+  if (!isFinite(s) || isNaN(s)) return '0:00';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+function startVideoControls() {
+  if (S.source !== 'direct') { vrVideoCtrl.style.display = 'none'; return; }
+  vrVideoCtrl.style.display = 'flex';
+
+  // Update every 500 ms
+  clearInterval(ctrlInterval);
+  ctrlInterval = setInterval(() => {
+    if (isSeeking || !bgVideo.duration) return;
+    const pct = (bgVideo.currentTime / bgVideo.duration) * 100;
+    vrSeek.value = pct;
+    // Gradient fill to show progress
+    vrSeek.style.background = `linear-gradient(to right, #fff ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
+    vrCurTime.textContent = fmtTime(bgVideo.currentTime);
+    vrDurTime.textContent = fmtTime(bgVideo.duration);
+    vrPlayBtn.textContent = bgVideo.paused ? '▶' : '⏸';
+  }, 500);
+}
+
+function stopVideoControls() {
+  clearInterval(ctrlInterval);
+  ctrlInterval = null;
+}
+
+// Play / pause
+vrPlayBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (bgVideo.paused) { bgVideo.play(); vrPlayBtn.textContent = '⏸'; }
+  else { bgVideo.pause(); vrPlayBtn.textContent = '▶'; }
+});
+
+// Seek — touchstart: flag seeking to pause live update
+vrSeek.addEventListener('touchstart', (e) => { isSeeking = true; e.stopPropagation(); }, { passive: true });
+vrSeek.addEventListener('mousedown',  ()  => { isSeeking = true; });
+
+vrSeek.addEventListener('input', (e) => {
+  e.stopPropagation();
+  const pct = +vrSeek.value;
+  vrSeek.style.background = `linear-gradient(to right, #fff ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
+  if (bgVideo.duration) {
+    vrCurTime.textContent = fmtTime((pct / 100) * bgVideo.duration);
+  }
+});
+
+vrSeek.addEventListener('change', (e) => {
+  e.stopPropagation();
+  if (bgVideo.duration) {
+    bgVideo.currentTime = (vrSeek.value / 100) * bgVideo.duration;
+  }
+  isSeeking = false;
+});
+
+vrSeek.addEventListener('touchend',  (e) => { e.stopPropagation(); isSeeking = false; }, { passive: true });
+
+// Hook into enterVR / exitVR
+const _origEnterVR = enterVR;
+const _origExitVR  = exitVR;
 
 /* ═══════════════════════════════════════════════
    Window resize
