@@ -977,12 +977,79 @@ function detectURL(raw) {
       return { source: 'direct', ext };
     }
 
-    // Unknown URL — still try to load it as direct video
-    return { source: 'direct', ext: '', uncertain: true };
+    // Webpage — try smart video extraction
+    return { source: 'webpage', url: raw };
 
   } catch {
     return null;
   }
+}
+
+/* ═══════════════════════════════════════════════
+   Smart Video Extractor — fetch webpage, find video URLs
+═══════════════════════════════════════════════ */
+async function extractVideoFromPage(pageUrl) {
+  const proxies = [
+    u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
+    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+  ];
+
+  let html = '';
+  for (const buildProxy of proxies) {
+    try {
+      const res = await fetch(buildProxy(pageUrl), { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) continue;
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text);
+        html = json.contents || json.html || text;
+      } catch {
+        html = text;
+      }
+      if (html.length > 500) break;
+    } catch {}
+  }
+  if (!html) return [];
+
+  // Decode unicode escapes (& → &, \/ → /)
+  html = html.replace(/\\u([\dA-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+             .replace(/\\\//g, '/');
+
+  const found = new Set();
+
+  // Pattern 1: bare m3u8 / mp4 URLs in JS or HTML
+  const urlRe = /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4|webm|m4v)(?:[^\s"'<>\\]*)?/gi;
+  for (const m of html.matchAll(urlRe)) {
+    const u = m[0].replace(/['")\]},;]+$/, '');
+    if (u.startsWith('http')) found.add(u);
+  }
+
+  // Pattern 2: JW Player / video.js "file":"URL"
+  for (const m of html.matchAll(/["'](?:file|src|url|source|hls|video)["']\s*:\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/gi)) {
+    found.add(m[1]);
+  }
+
+  // Pattern 3: <source src="URL"> or <video src="URL">
+  for (const m of html.matchAll(/(?:source|video)[^>]+src=["']([^"']+)["']/gi)) {
+    if (/\.(m3u8|mp4|webm)/i.test(m[1])) found.add(m[1]);
+  }
+
+  // Pattern 4: JSON "mp4":"URL" or "m3u8":"URL"
+  for (const m of html.matchAll(/["'](?:mp4|m3u8|hls|stream)["']\s*:\s*["']([^"']+)["']/gi)) {
+    if (/^https?:/.test(m[1])) found.add(m[1]);
+  }
+
+  // Pattern 5: Jable / similar — var xxx = "URL"
+  for (const m of html.matchAll(/(?:var|let|const)\s+\w+\s*=\s*["']([^"']+\.m3u8[^"']*)["']/gi)) {
+    found.add(m[1]);
+  }
+
+  const all = [...found];
+  // Prefer m3u8 > mp4 > others; prefer shorter (more likely to be clean URL)
+  const rank = u => (u.includes('.m3u8') ? 0 : u.includes('.mp4') ? 1 : 2);
+  all.sort((a, b) => rank(a) - rank(b) || a.length - b.length);
+  return all;
 }
 
 function ytEmbed(id, extra = '') {
@@ -1045,6 +1112,67 @@ async function loadVideo() {
     return;
   }
 
+  /* ── Webpage: smart extraction ── */
+  if (info.source === 'webpage') {
+    loadBtn.textContent = '分析頁面中...';
+    loadBtn.disabled = true;
+    loadingEl.querySelector('.loading-text').textContent = '正在分析頁面，尋找影片...';
+    showLoading();
+
+    const videos = await extractVideoFromPage(url);
+
+    loadBtn.textContent = '載入影片';
+    loadBtn.disabled = false;
+    loadingEl.querySelector('.loading-text').textContent = '載入中...';
+
+    if (!videos.length) {
+      showUrlError(
+        '❌ 找不到可播放的影片。<br>' +
+        '此頁面可能需要登入、使用加密串流、或影片未公開。<br>' +
+        '<small>試試先在 Safari 開啟頁面確認影片能正常播放</small>'
+      );
+      hideLoading();
+      return;
+    }
+
+    // Use first (best) video URL found
+    const foundUrl = videos[0];
+    S.url = foundUrl;
+    S.source = 'direct';
+    S.ytId = '';
+
+    sourceLabel.textContent = foundUrl.includes('.m3u8') ? 'HLS 串流' : 'MP4';
+    const v = document.createElement('video');
+    v.controls = true;
+    v.muted = true;
+    v.autoplay = true;
+    v.setAttribute('playsinline', '');
+    v.setAttribute('webkit-playsinline', '');
+
+    if (foundUrl.includes('.m3u8') && window.Hls && Hls.isSupported()) {
+      const hls = new Hls();
+      hls.loadSource(foundUrl);
+      hls.attachMedia(v);
+    } else {
+      v.src = foundUrl;
+    }
+
+    v.addEventListener('error', () => {
+      showUrlError('❌ 找到影片網址但無法播放，可能有防盜連結保護。');
+    }, { once: true });
+
+    previewWrap.appendChild(v);
+    hideLoading();
+    switchScreen(settingsScreen);
+
+    if (videos.length > 1) {
+      toast(`共找到 ${videos.length} 個影片，已選最佳畫質`, 3000);
+    } else {
+      toast('✅ 找到影片，選好模式後進入 VR！', 2500);
+    }
+    return;
+  }
+
   S.source = info.source === 'bilibili' ? 'bilibili' : info.source;
   S.ytId   = info.id || '';
 
@@ -1075,9 +1203,6 @@ async function loadVideo() {
   } else {
     // direct video
     sourceLabel.textContent = info.ext ? info.ext.toUpperCase() : '直接影片';
-    if (info.uncertain) {
-      sourceLabel.textContent = '嘗試載入';
-    }
     const v = document.createElement('video');
     v.controls = true;
     v.muted = true;
