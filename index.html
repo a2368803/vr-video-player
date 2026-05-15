@@ -325,28 +325,45 @@
       width: 100%;
       max-width: 700px;
     }
-    /* seek bar */
-    #vr-seek {
+    /* custom seek bar */
+    #vr-seek-wrap {
       flex: 1;
-      -webkit-appearance: none;
-      appearance: none;
-      height: 6px;
-      border-radius: 3px;
-      background: rgba(255,255,255,0.25);
-      outline: none;
+      height: 44px;
+      display: flex;
+      align-items: center;
       cursor: pointer;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    #vr-seek-track {
+      width: 100%;
+      height: 6px;
+      background: rgba(255,255,255,0.22);
+      border-radius: 3px;
       position: relative;
     }
-    #vr-seek::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 22px; height: 22px;
-      border-radius: 50%;
+    #vr-seek-fill {
+      height: 100%;
+      width: 0%;
       background: #fff;
-      box-shadow: 0 0 6px rgba(0,0,0,0.5);
-      cursor: pointer;
-    }
-    #vr-seek::-webkit-slider-runnable-track {
       border-radius: 3px;
+      pointer-events: none;
+    }
+    #vr-seek-thumb {
+      position: absolute;
+      width: 26px; height: 26px;
+      background: #fff;
+      border-radius: 50%;
+      top: 50%;
+      left: 0%;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+      pointer-events: none;
+      transition: transform 0.05s;
+    }
+    #vr-seek-wrap:active #vr-seek-thumb {
+      transform: translate(-50%, -50%) scale(1.25);
     }
     .vr-time {
       font-size: 12px;
@@ -902,7 +919,12 @@
       <div class="vr-ctrl-row" id="vr-video-ctrl" style="display:none;">
         <button class="vr-play-btn" id="vr-play-btn">⏸</button>
         <span class="vr-time" id="vr-cur-time">0:00</span>
-        <input type="range" id="vr-seek" min="0" max="100" value="0" step="0.1">
+        <div id="vr-seek-wrap">
+          <div id="vr-seek-track">
+            <div id="vr-seek-fill"></div>
+            <div id="vr-seek-thumb"></div>
+          </div>
+        </div>
         <span class="vr-time" id="vr-dur-time">0:00</span>
       </div>
     </div>
@@ -1883,40 +1905,51 @@ function updateGyroBtn() {
 }
 
 /* ═══════════════════════════════════════════════
-   VR Video Controls
+   VR Video Controls — custom seek bar (iOS-safe)
 ═══════════════════════════════════════════════ */
 const vrVideoCtrl = $('vr-video-ctrl');
-const vrSeek      = $('vr-seek');
+const vrSeekWrap  = $('vr-seek-wrap');
+const vrSeekFill  = $('vr-seek-fill');
+const vrSeekThumb = $('vr-seek-thumb');
 const vrCurTime   = $('vr-cur-time');
 const vrDurTime   = $('vr-dur-time');
 const vrPlayBtn   = $('vr-play-btn');
 
 let ctrlInterval = null;
-let isSeeking = false;
+let isSeeking    = false;
+let seekPct      = 0;
 
 function fmtTime(s) {
   if (!isFinite(s) || isNaN(s)) return '0:00';
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
   return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+function setSeekPct(pct) {
+  seekPct = Math.max(0, Math.min(100, pct));
+  vrSeekFill.style.width  = seekPct + '%';
+  vrSeekThumb.style.left  = seekPct + '%';
+}
+
+function pctFromTouch(e) {
+  const rect = vrSeekWrap.getBoundingClientRect();
+  const clientX = (e.touches && e.touches.length) ? e.touches[0].clientX
+                : (e.changedTouches && e.changedTouches.length) ? e.changedTouches[0].clientX
+                : e.clientX;
+  return Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
 }
 
 function startVideoControls() {
   if (S.source !== 'direct') { vrVideoCtrl.style.display = 'none'; return; }
   vrVideoCtrl.style.display = 'flex';
-
-  // Update every 500 ms
   clearInterval(ctrlInterval);
   ctrlInterval = setInterval(() => {
     if (isSeeking || !bgVideo.duration) return;
-    const pct = (bgVideo.currentTime / bgVideo.duration) * 100;
-    vrSeek.value = pct;
-    // Gradient fill to show progress
-    vrSeek.style.background = `linear-gradient(to right, #fff ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
+    setSeekPct((bgVideo.currentTime / bgVideo.duration) * 100);
     vrCurTime.textContent = fmtTime(bgVideo.currentTime);
     vrDurTime.textContent = fmtTime(bgVideo.duration);
     vrPlayBtn.textContent = bgVideo.paused ? '▶' : '⏸';
-  }, 500);
+  }, 400);
 }
 
 function stopVideoControls() {
@@ -1925,38 +1958,39 @@ function stopVideoControls() {
 }
 
 // Play / pause
-vrPlayBtn.addEventListener('click', (e) => {
+vrPlayBtn.addEventListener('click', e => {
   e.stopPropagation();
-  if (bgVideo.paused) { bgVideo.play(); vrPlayBtn.textContent = '⏸'; }
-  else { bgVideo.pause(); vrPlayBtn.textContent = '▶'; }
+  bgVideo.paused ? bgVideo.play() : bgVideo.pause();
+  vrPlayBtn.textContent = bgVideo.paused ? '▶' : '⏸';
 });
 
-// Seek — touchstart: flag seeking to pause live update
-vrSeek.addEventListener('touchstart', (e) => { isSeeking = true; e.stopPropagation(); }, { passive: true });
-vrSeek.addEventListener('mousedown',  ()  => { isSeeking = true; });
-
-vrSeek.addEventListener('input', (e) => {
+// Custom seek — touchstart
+vrSeekWrap.addEventListener('touchstart', e => {
   e.stopPropagation();
-  const pct = +vrSeek.value;
-  vrSeek.style.background = `linear-gradient(to right, #fff ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
-  if (bgVideo.duration) {
-    vrCurTime.textContent = fmtTime((pct / 100) * bgVideo.duration);
-  }
-});
+  isSeeking = true;
+  const pct = pctFromTouch(e);
+  setSeekPct(pct);
+  if (bgVideo.duration) vrCurTime.textContent = fmtTime((pct / 100) * bgVideo.duration);
+}, { passive: true });
 
-vrSeek.addEventListener('change', (e) => {
+// Custom seek — touchmove
+vrSeekWrap.addEventListener('touchmove', e => {
   e.stopPropagation();
-  if (bgVideo.duration) {
-    bgVideo.currentTime = (vrSeek.value / 100) * bgVideo.duration;
-  }
+  if (!isSeeking) return;
+  const pct = pctFromTouch(e);
+  setSeekPct(pct);
+  if (bgVideo.duration) vrCurTime.textContent = fmtTime((pct / 100) * bgVideo.duration);
+}, { passive: true });
+
+// Custom seek — touchend: commit seek
+vrSeekWrap.addEventListener('touchend', e => {
+  e.stopPropagation();
+  if (!isSeeking) return;
   isSeeking = false;
-});
-
-vrSeek.addEventListener('touchend',  (e) => { e.stopPropagation(); isSeeking = false; }, { passive: true });
-
-// Hook into enterVR / exitVR
-const _origEnterVR = enterVR;
-const _origExitVR  = exitVR;
+  const pct = pctFromTouch(e);
+  setSeekPct(pct);
+  if (bgVideo.duration) bgVideo.currentTime = (pct / 100) * bgVideo.duration;
+}, { passive: true });
 
 /* ═══════════════════════════════════════════════
    Window resize
