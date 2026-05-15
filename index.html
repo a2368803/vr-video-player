@@ -1417,6 +1417,8 @@ function buildThreeVR() {
   ytVrWrap.classList.remove('active');
 
   S.resetQuat = null;
+  userYaw = 0; userPitch = 0;
+  currentFOV = 90; meshScale = 1.0;
   renderLoop();
 }
 
@@ -1531,23 +1533,18 @@ function renderLoop() {
   const eyeW = W / 2;
   const eyeSep = S.iod / 1000;
 
-  // Camera orientation
+  // Camera orientation — gyro as base, touch as additive offset
+  const touchYawQ   = new THREE.Quaternion().setFromAxisAngle(_up,              THREE.MathUtils.degToRad(userYaw));
+  const touchPitchQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), THREE.MathUtils.degToRad(userPitch));
+  const touchOffsetQ = touchYawQ.clone().multiply(touchPitchQ);
+
   if (S.gyroActive && S.useGyro) {
     const q = gyroToQuat(S.orient.alpha, S.orient.beta, S.orient.gamma);
-    if (!S.resetQuat) {
-      S.resetQuat = q.clone().invert();
-    }
-    const final = S.resetQuat.clone().multiply(q);
-    mainCam.quaternion.copy(final);
+    if (!S.resetQuat) S.resetQuat = q.clone().invert();
+    const gyroBase = S.resetQuat.clone().multiply(q);
+    mainCam.quaternion.copy(touchOffsetQ).multiply(gyroBase);
   } else {
-    // Touch/drag control
-    const pitchQ = new THREE.Quaternion().setFromAxisAngle(
-      new THREE.Vector3(1, 0, 0), THREE.MathUtils.degToRad(userPitch)
-    );
-    const yawQ = new THREE.Quaternion().setFromAxisAngle(
-      _up, THREE.MathUtils.degToRad(userYaw)
-    );
-    mainCam.quaternion.multiplyQuaternions(yawQ, pitchQ);
+    mainCam.quaternion.copy(touchOffsetQ);
   }
 
   // Eye positions
@@ -1740,35 +1737,110 @@ function exitVR() {
 }
 
 /* ═══════════════════════════════════════════════
-   Touch drag control (when gyro off)
+   Touch controls — pan / pinch-zoom / 2-finger distance
 ═══════════════════════════════════════════════ */
+let currentFOV  = 90;
+let meshScale   = 1.0;
+const touchMap  = {};          // id → {x,y}
+let  pinchState = null;
+let  lastTap    = 0;
+
+function applyFOV() {
+  [camL, camR, mainCam].forEach(c => {
+    if (!c) return;
+    c.fov = currentFOV;
+    c.updateProjectionMatrix();
+  });
+}
+
+function applyMeshScale() {
+  if (!scene3) return;
+  scene3.children.filter(c => c.isMesh).forEach(m => m.scale.setScalar(meshScale));
+}
+
+let zoomHintTimer;
+function showZoomHint(label) {
+  toastEl.textContent = label;
+  toastEl.classList.add('show');
+  clearTimeout(zoomHintTimer);
+  zoomHintTimer = setTimeout(() => toastEl.classList.remove('show'), 1200);
+}
+
+function activeTouches() { return Object.values(touchMap); }
+
 vrScreen.addEventListener('touchstart', e => {
-  if (e.touches.length === 1) {
-    dragState = { x: e.touches[0].clientX, y: e.touches[0].clientY, yaw: userYaw, pitch: userPitch };
+  if (e.target.closest('#vr-hud')) return;
+  for (const t of e.changedTouches)
+    touchMap[t.identifier] = { x: t.clientX, y: t.clientY };
+
+  const pts = activeTouches();
+
+  if (pts.length === 2) {
+    // Start pinch
+    pinchState = {
+      dist:  Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y),
+      midX:  (pts[0].x + pts[1].x) / 2,
+      midY:  (pts[0].y + pts[1].y) / 2,
+      fov:   currentFOV,
+      scale: meshScale,
+    };
+    dragState = null;
+  } else if (pts.length === 1 && !pinchState) {
+    dragState = { x: pts[0].x, y: pts[0].y, yaw: userYaw, pitch: userPitch };
   }
 }, { passive: true });
 
 vrScreen.addEventListener('touchmove', e => {
-  if (!dragState || e.touches.length !== 1) return;
-  const dx = e.touches[0].clientX - dragState.x;
-  const dy = e.touches[0].clientY - dragState.y;
-  userYaw   = dragState.yaw   + dx * 0.25;
-  userPitch = Math.max(-80, Math.min(80, dragState.pitch - dy * 0.25));
+  if (e.target.closest('#vr-hud')) return;
+  for (const t of e.changedTouches)
+    touchMap[t.identifier] = { x: t.clientX, y: t.clientY };
+
+  const pts = activeTouches();
+
+  if (pts.length >= 2 && pinchState) {
+    const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+    const midY = (pts[0].y + pts[1].y) / 2;
+
+    // Pinch → FOV zoom (pinch apart = bigger image = lower FOV)
+    const ratio = pinchState.dist / dist;
+    currentFOV = Math.max(25, Math.min(130, pinchState.fov * ratio));
+    applyFOV();
+
+    // Two-finger drag up/down → mesh scale (screen forward/backward)
+    const dy = (pinchState.midY - midY) * 0.006;  // drag up = bigger
+    meshScale = Math.max(0.2, Math.min(4.0, pinchState.scale + dy));
+    applyMeshScale();
+
+    showZoomHint(`視角 ${Math.round(currentFOV)}°  大小 ${Math.round(meshScale * 100)}%`);
+
+  } else if (pts.length === 1 && dragState) {
+    const dx = pts[0].x - dragState.x;
+    const dy = pts[0].y - dragState.y;
+    userYaw   = dragState.yaw   + dx * 0.3;
+    userPitch = Math.max(-85, Math.min(85, dragState.pitch - dy * 0.3));
+  }
 }, { passive: true });
 
-vrScreen.addEventListener('touchend', () => { dragState = null; }, { passive: true });
-
-// Double-tap to toggle HUD
-let lastTap = 0;
-vrScreen.addEventListener('touchend', (e) => {
-  // Ignore taps on HUD buttons or seek bar
+vrScreen.addEventListener('touchend', e => {
   if (e.target.closest('#vr-hud')) return;
-  const now = Date.now();
-  if (now - lastTap < 300) {
-    S.hudVisible = !S.hudVisible;
-    vrHud.classList.toggle('hidden', !S.hudVisible);
+  for (const t of e.changedTouches) delete touchMap[t.identifier];
+
+  const pts = activeTouches();
+  if (pts.length < 2) pinchState = null;
+  if (pts.length === 1) {
+    // Transition from 2→1 finger: reset drag base so view doesn't jump
+    dragState = { x: pts[0].x, y: pts[0].y, yaw: userYaw, pitch: userPitch };
   }
-  lastTap = now;
+  if (pts.length === 0) {
+    dragState = null;
+    // Double-tap detection
+    const now = Date.now();
+    if (now - lastTap < 280) {
+      S.hudVisible = !S.hudVisible;
+      vrHud.classList.toggle('hidden', !S.hudVisible);
+    }
+    lastTap = now;
+  }
 }, { passive: true });
 
 /* ═══════════════════════════════════════════════
@@ -1790,9 +1862,13 @@ $('vr-gyro-btn').addEventListener('click', async () => {
 
 $('vr-reset-btn').addEventListener('click', () => {
   S.resetQuat = null;
-  userYaw = 0;
+  userYaw   = 0;
   userPitch = 0;
-  toast('視角已重設');
+  currentFOV = 90;
+  meshScale  = 1.0;
+  applyFOV();
+  applyMeshScale();
+  toast('視角與大小已重設');
 });
 
 function updateGyroBtn() {
