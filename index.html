@@ -1448,19 +1448,67 @@ function buildThreeVR() {
   renderLoop();
 }
 
+let videoMesh = null; // only the screen, for scale control
+
+function mkPlane(w, h, color, side = THREE.FrontSide) {
+  return new THREE.Mesh(
+    new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({ color, side })
+  );
+}
+
 function buildGeometry() {
   scene3.children.filter(c => c.isMesh).forEach(m => { scene3.remove(m); });
+  videoMesh = null;
 
   const mat = new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.BackSide });
 
   if (S.mode === 'flat') {
-    // Normal cinema screen — 16:9 flat plane at comfortable distance
-    const screenW = 3.2, screenH = screenW * (9 / 16);
-    const geo = new THREE.PlaneGeometry(screenW, screenH);
-    const planeMat = new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.FrontSide });
-    const mesh = new THREE.Mesh(geo, planeMat);
-    mesh.position.set(0, 0, -4);
-    scene3.add(mesh);
+    const SW = 3.2, SH = SW * 9 / 16, DIST = 4.5;
+
+    // ── Video screen ──
+    const screenMat = new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.FrontSide });
+    videoMesh = new THREE.Mesh(new THREE.PlaneGeometry(SW, SH), screenMat);
+    videoMesh.position.set(0, 0, -DIST);
+    scene3.add(videoMesh);
+
+    // ── Bezel (black border around screen) ──
+    const bezel = mkPlane(SW + 0.18, SH + 0.12, 0x060608);
+    bezel.position.set(0, 0, -DIST - 0.01);
+    scene3.add(bezel);
+
+    // ── Cinema room geometry ──
+    const eyeH = 0; // camera eye height
+
+    // Floor
+    const floor = mkPlane(40, 30, 0x0a0a10);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.set(0, eyeH - SH / 2 - 1.2, -DIST / 2);
+    scene3.add(floor);
+
+    // Ceiling
+    const ceil = mkPlane(40, 30, 0x050508);
+    ceil.rotation.x = Math.PI / 2;
+    ceil.position.set(0, eyeH + SH / 2 + 2.0, -DIST / 2);
+    scene3.add(ceil);
+
+    // Left wall
+    const lw = mkPlane(30, 8, 0x08080e, THREE.BackSide);
+    lw.rotation.y = Math.PI / 2;
+    lw.position.set(-8, eyeH, -DIST / 2);
+    scene3.add(lw);
+
+    // Right wall
+    const rw = mkPlane(30, 8, 0x08080e, THREE.BackSide);
+    rw.rotation.y = -Math.PI / 2;
+    rw.position.set(8, eyeH, -DIST / 2);
+    scene3.add(rw);
+
+    // Back wall (behind viewer)
+    const bw = mkPlane(20, 8, 0x070710);
+    bw.rotation.y = Math.PI;
+    bw.position.set(0, eyeH, 4);
+    scene3.add(bw);
 
   } else if (S.mode === '360') {
     const geo = new THREE.SphereGeometry(10, 64, 64);
@@ -1572,12 +1620,23 @@ function renderLoop() {
     mainCam.quaternion.copy(touchOffsetQ);
   }
 
-  // Eye positions
+  // Eye positions + toe-in convergence for flat mode
   const right = new THREE.Vector3(1, 0, 0).applyQuaternion(mainCam.quaternion);
-  camL.quaternion.copy(mainCam.quaternion);
-  camR.quaternion.copy(mainCam.quaternion);
   camL.position.copy(right).multiplyScalar(-eyeSep / 2);
   camR.position.copy(right).multiplyScalar(eyeSep / 2);
+
+  if (S.mode === 'flat') {
+    // Converge both eyes toward screen at DIST=4.5
+    const toeAngle = Math.atan2(eyeSep / 2, 4.5);
+    const yAxis = new THREE.Vector3(0, 1, 0);
+    const toeL = new THREE.Quaternion().setFromAxisAngle(yAxis,  toeAngle);
+    const toeR = new THREE.Quaternion().setFromAxisAngle(yAxis, -toeAngle);
+    camL.quaternion.copy(toeL).multiply(mainCam.quaternion);
+    camR.quaternion.copy(toeR).multiply(mainCam.quaternion);
+  } else {
+    camL.quaternion.copy(mainCam.quaternion);
+    camR.quaternion.copy(mainCam.quaternion);
+  }
   camL.aspect = eyeW / H;
   camR.aspect = eyeW / H;
   camL.updateProjectionMatrix();
@@ -1777,7 +1836,8 @@ function applyFOV() {
   [camL, camR, mainCam].forEach(c => { if (c) { c.fov = currentFOV; c.updateProjectionMatrix(); } });
 }
 function applyMeshScale() {
-  if (scene3) scene3.children.filter(c => c.isMesh).forEach(m => m.scale.setScalar(meshScale));
+  if (videoMesh) videoMesh.scale.setScalar(meshScale);
+  else if (scene3) scene3.children.filter(c => c.isMesh).forEach(m => m.scale.setScalar(meshScale));
 }
 
 let zoomHintTimer;
