@@ -848,8 +848,8 @@
   <div class="mode-grid">
     <div class="mode-card active" data-mode="flat">
       <span class="mc-icon">🎬</span>
-      <div class="mc-name">大螢幕模式</div>
-      <div class="mc-desc">普通影片 · 弧形大屏</div>
+      <div class="mc-name">銀幕模式</div>
+      <div class="mc-desc">普通影片 · 正常大小</div>
     </div>
     <div class="mode-card" data-mode="360">
       <span class="mc-icon">🌐</span>
@@ -1440,7 +1440,8 @@ function buildThreeVR() {
 
   S.resetQuat = null;
   userYaw = 0; userPitch = 0;
-  currentFOV = 90; meshScale = 1.0;
+  currentFOV = S.mode === 'flat' ? 75 : 90;
+  meshScale = 1.0;
   renderLoop();
 }
 
@@ -1450,13 +1451,12 @@ function buildGeometry() {
   const mat = new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.BackSide });
 
   if (S.mode === 'flat') {
-    // Curved screen — partial sphere
-    const geo = new THREE.SphereGeometry(8, 64, 32,
-      Math.PI / 2 - Math.PI * 0.55, Math.PI * 1.1,
-      Math.PI / 2 - Math.PI * 0.32, Math.PI * 0.64
-    );
-    const mesh = new THREE.Mesh(geo, mat.clone());
-    mesh.rotation.y = Math.PI;
+    // Normal cinema screen — 16:9 flat plane at comfortable distance
+    const screenW = 3.2, screenH = screenW * (9 / 16);
+    const geo = new THREE.PlaneGeometry(screenW, screenH);
+    const planeMat = new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.FrontSide });
+    const mesh = new THREE.Mesh(geo, planeMat);
+    mesh.position.set(0, 0, -4);
     scene3.add(mesh);
 
   } else if (S.mode === '360') {
@@ -1886,7 +1886,7 @@ $('vr-reset-btn').addEventListener('click', () => {
   S.resetQuat = null;
   userYaw   = 0;
   userPitch = 0;
-  currentFOV = 90;
+  currentFOV = S.mode === 'flat' ? 75 : 90;
   meshScale  = 1.0;
   applyFOV();
   applyMeshScale();
