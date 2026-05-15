@@ -83,6 +83,21 @@
     }
     .paste-btn:active { opacity: 0.7; }
 
+    /* inline error */
+    #url-error {
+      display: none;
+      width: 100%; max-width: 500px;
+      background: rgba(239,68,68,0.12);
+      border: 1px solid rgba(239,68,68,0.4);
+      border-radius: 12px;
+      padding: 12px 16px;
+      font-size: 13px;
+      color: #fca5a5;
+      line-height: 1.5;
+    }
+    #url-error.show { display: block; }
+    .url-box.error { border-color: rgba(239,68,68,0.6); }
+
     .btn-main {
       width: 100%; max-width: 500px;
       padding: 16px;
@@ -363,10 +378,12 @@
     <div class="app-sub">iPhone 15 Pro × VR 盒子</div>
   </div>
 
-  <div class="url-box">
+  <div class="url-box" id="url-box">
     <input id="url-input" type="url" placeholder="貼上影片網址..." autocomplete="off" autocorrect="off" spellcheck="false" inputmode="url">
     <button class="paste-btn" id="paste-btn">貼上</button>
   </div>
+
+  <div id="url-error"></div>
 
   <button class="btn-main" id="load-btn">載入影片</button>
 
@@ -534,30 +551,68 @@ function switchScreen(to) {
    URL detection
 ═══════════════════════════════════════════════ */
 function detectURL(raw) {
+  // Strip whitespace / invisible chars
+  raw = raw.trim().replace(/[​-‍﻿]/g, '');
+
+  // Auto-prepend https if missing
+  if (raw && !raw.startsWith('http') && !raw.startsWith('blob:')) {
+    raw = 'https://' + raw;
+  }
+
   try {
     const u = new URL(raw);
-    const host = u.hostname.replace('www.', '');
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
 
-    if (host === 'youtube.com' || host === 'youtu.be' || host === 'm.youtube.com') {
+    /* ── YouTube ── */
+    if (['youtube.com', 'youtu.be', 'm.youtube.com',
+         'music.youtube.com', 'youtube-nocookie.com'].includes(host)) {
       let id = u.searchParams.get('v') || '';
-      if (!id && host === 'youtu.be') id = u.pathname.slice(1).split('?')[0];
-      if (!id && u.pathname.includes('/shorts/')) id = u.pathname.split('/shorts/')[1].split('/')[0];
-      if (!id && u.pathname.includes('/embed/')) id = u.pathname.split('/embed/')[1].split('/')[0];
+
+      if (!id && host === 'youtu.be')
+        id = u.pathname.slice(1).split(/[?&]/)[0];
+
+      const pathParts = u.pathname.split('/').filter(Boolean);
+      if (!id) {
+        const markers = ['shorts', 'embed', 'live', 'v', 'e'];
+        for (const m of markers) {
+          const idx = pathParts.indexOf(m);
+          if (idx !== -1 && pathParts[idx + 1]) {
+            id = pathParts[idx + 1].split('?')[0];
+            break;
+          }
+        }
+      }
+      // playlist without video id → treat as unsupported (show helpful msg)
+      if (!id && u.searchParams.has('list')) {
+        return { source: 'youtube-playlist', listId: u.searchParams.get('list') };
+      }
       return id ? { source: 'youtube', id } : null;
     }
 
-    if (host === 'vimeo.com') {
-      const id = u.pathname.replace(/\//g, '');
-      return id ? { source: 'vimeo', id } : null;
+    /* ── Vimeo ── */
+    if (host === 'vimeo.com' || host === 'player.vimeo.com') {
+      const id = u.pathname.split('/').filter(Boolean)[0];
+      return id && /^\d+$/.test(id) ? { source: 'vimeo', id } : null;
     }
 
-    const ext = u.pathname.split('.').pop().toLowerCase();
-    if (['mp4', 'webm', 'ogv', 'mov', 'm3u8', 'ts'].includes(ext) || raw.startsWith('blob:')) {
+    /* ── Bilibili ── */
+    if (host === 'bilibili.com' || host === 'b23.tv') {
+      const match = u.pathname.match(/\/(BV[\w]+|av\d+)/i);
+      if (match) return { source: 'bilibili', id: match[1] };
+      return { source: 'bilibili-page', url: raw };
+    }
+
+    /* ── Direct video file / stream ── */
+    const pathname = u.pathname.toLowerCase();
+    const ext = pathname.split('.').pop();
+    const videoExts = ['mp4', 'webm', 'ogv', 'ogg', 'mov', 'mkv', 'm3u8', 'ts', 'm4v'];
+    if (videoExts.includes(ext) || raw.startsWith('blob:')) {
       return { source: 'direct', ext };
     }
 
-    // Try direct anyway
-    return { source: 'direct', ext: '' };
+    // Unknown URL — still try to load it as direct video
+    return { source: 'direct', ext: '', uncertain: true };
+
   } catch {
     return null;
   }
@@ -567,21 +622,63 @@ function ytEmbed(id, extra = '') {
   return `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&playsinline=1&rel=0&modestbranding=1&controls=1${extra}`;
 }
 
+/* ── Error helpers ── */
+const urlBox   = document.getElementById('url-box');
+const urlError = document.getElementById('url-error');
+
+function showUrlError(msg) {
+  urlError.innerHTML = msg;
+  urlError.classList.add('show');
+  urlBox.classList.add('error');
+  hideLoading();
+}
+function clearUrlError() {
+  urlError.classList.remove('show');
+  urlBox.classList.remove('error');
+}
+
 /* ═══════════════════════════════════════════════
    Load Video → Settings Screen
 ═══════════════════════════════════════════════ */
 async function loadVideo() {
-  const url = urlInput.value.trim();
-  if (!url) { toast('請貼上影片網址'); return; }
+  const raw = urlInput.value.trim();
+  clearUrlError();
 
-  S.url = url;
+  if (!raw) {
+    showUrlError('請先貼上影片網址（YouTube、MP4 等）');
+    return;
+  }
+
+  const loadBtn = document.getElementById('load-btn');
+  loadBtn.textContent = '正在載入...';
+  loadBtn.disabled = true;
   showLoading();
   clearPreview();
 
-  const info = detectURL(url);
-  if (!info) { hideLoading(); toast('無法識別的網址格式'); return; }
+  const url = (raw.startsWith('http') || raw.startsWith('blob:')) ? raw : 'https://' + raw;
+  S.url = url;
 
-  S.source = info.source;
+  const info = detectURL(raw);
+
+  loadBtn.textContent = '載入影片';
+  loadBtn.disabled = false;
+
+  if (!info) {
+    showUrlError('❌ 無法識別此網址。<br>請貼上 <b>YouTube 影片網址</b>（非頻道頁）、<b>MP4 / M3U8</b> 直接連結，或 <b>Vimeo</b> 網址。');
+    return;
+  }
+
+  if (info.source === 'youtube-playlist') {
+    showUrlError('⚠️ 偵測到 <b>播放清單</b> 網址，請改貼<b>單一影片網址</b>（帶有 <code>?v=</code> 的網址）。<br>例：<code>youtube.com/watch?v=XXXXX</code>');
+    return;
+  }
+
+  if (info.source === 'bilibili-page') {
+    showUrlError('⚠️ Bilibili 影片受限無法直接嵌入。請複製影片的 <b>直接 MP4 連結</b>，或改用 YouTube 影片。');
+    return;
+  }
+
+  S.source = info.source === 'bilibili' ? 'bilibili' : info.source;
   S.ytId   = info.id || '';
 
   if (info.source === 'youtube') {
@@ -600,8 +697,20 @@ async function loadVideo() {
     iframe.allowFullscreen = true;
     previewWrap.appendChild(iframe);
 
+  } else if (info.source === 'bilibili') {
+    sourceLabel.textContent = 'Bilibili';
+    const iframe = document.createElement('iframe');
+    iframe.src = `https://player.bilibili.com/player.html?bvid=${info.id}&autoplay=1`;
+    iframe.allow = 'autoplay; fullscreen';
+    iframe.allowFullscreen = true;
+    previewWrap.appendChild(iframe);
+
   } else {
-    sourceLabel.textContent = info.ext ? info.ext.toUpperCase() : '直接連結';
+    // direct video
+    sourceLabel.textContent = info.ext ? info.ext.toUpperCase() : '直接影片';
+    if (info.uncertain) {
+      sourceLabel.textContent = '嘗試載入';
+    }
     const v = document.createElement('video');
     v.controls = true;
     v.muted = true;
@@ -616,6 +725,10 @@ async function loadVideo() {
     } else {
       v.src = url;
     }
+
+    v.addEventListener('error', () => {
+      showUrlError(`❌ 無法載入此影片。<br>可能原因：網址失效、需要登入、或格式不支援。<br><small>（${url.slice(0, 60)}...）</small>`);
+    }, { once: true });
 
     previewWrap.appendChild(v);
   }
@@ -964,6 +1077,8 @@ function buildIframeVR() {
   let src;
   if (S.source === 'youtube') {
     src = ytEmbed(S.ytId, '&mute=0');
+  } else if (S.source === 'bilibili') {
+    src = `https://player.bilibili.com/player.html?bvid=${S.ytId}&autoplay=1&danmaku=0`;
   } else {
     src = `https://player.vimeo.com/video/${S.ytId}?autoplay=1&loop=1`;
   }
@@ -1041,6 +1156,7 @@ async function enterVR() {
   if (S.source === 'direct') {
     buildThreeVR();
   } else {
+    // youtube / vimeo / bilibili — all use iframe split view
     buildIframeVR();
   }
 
