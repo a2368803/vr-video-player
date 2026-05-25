@@ -1349,6 +1349,13 @@ async function loadVideo() {
 
   } else {
     // direct video
+    S._isHLS = info.ext === 'm3u8' || url.includes('.m3u8');
+    let directPlayUrl = url;
+    if (S._isHLS) {
+      try { directPlayUrl = await getPlayableHlsUrl(url); } catch {}
+    }
+    S.url = directPlayUrl;
+
     sourceLabel.textContent = info.ext ? info.ext.toUpperCase() : '直接影片';
     const v = document.createElement('video');
     v.controls = true;
@@ -1357,12 +1364,12 @@ async function loadVideo() {
     v.setAttribute('playsinline', '');
     v.setAttribute('webkit-playsinline', '');
 
-    if ((info.ext === 'm3u8' || url.includes('.m3u8')) && window.Hls && Hls.isSupported()) {
+    if (S._isHLS && window.Hls && Hls.isSupported()) {
       const hls = new Hls();
-      hls.loadSource(url);
+      hls.loadSource(directPlayUrl);
       hls.attachMedia(v);
     } else {
-      v.src = url;
+      v.src = directPlayUrl;
     }
 
     v.addEventListener('error', () => {
