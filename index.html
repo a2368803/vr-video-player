@@ -1073,26 +1073,42 @@ function detectURL(raw) {
    Smart Video Extractor — fetch webpage, find video URLs
 ═══════════════════════════════════════════════ */
 async function extractVideoFromPage(pageUrl) {
-  const proxies = [
+  const proxyBuilders = [
+    u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
-    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
     u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+    u => `https://thingproxy.freeboard.io/fetch/${u}`,
   ];
 
+  const tryProxy = async (build) => {
+    const res = await fetch(build(pageUrl), {
+      signal: AbortSignal.timeout(14000),
+      headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1' }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    let content = text;
+    try { const j = JSON.parse(text); content = j.contents || j.html || text; } catch {}
+    if (content.length < 500) throw new Error('empty');
+    return content;
+  };
+
   let html = '';
-  for (const buildProxy of proxies) {
-    try {
-      const res = await fetch(buildProxy(pageUrl), { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) continue;
-      const text = await res.text();
+  // Try all proxies in parallel, take the first that succeeds
+  try {
+    html = await Promise.any(proxyBuilders.map(b => tryProxy(b)));
+  } catch {
+    // All failed — try sequential with longer timeout as last resort
+    for (const b of proxyBuilders) {
       try {
-        const json = JSON.parse(text);
-        html = json.contents || json.html || text;
-      } catch {
-        html = text;
-      }
-      if (html.length > 500) break;
-    } catch {}
+        const res = await fetch(b(pageUrl), { signal: AbortSignal.timeout(18000) });
+        if (!res.ok) continue;
+        const text = await res.text();
+        try { const j = JSON.parse(text); html = j.contents || j.html || text; } catch { html = text; }
+        if (html.length > 500) break;
+      } catch {}
+    }
   }
   if (!html) return [];
 
@@ -1124,9 +1140,19 @@ async function extractVideoFromPage(pageUrl) {
     if (/^https?:/.test(m[1])) found.add(m[1]);
   }
 
-  // Pattern 5: Jable / similar — var xxx = "URL"
+  // Pattern 5: Jable / similar — var xxx = "URL.m3u8..."
   for (const m of html.matchAll(/(?:var|let|const)\s+\w+\s*=\s*["']([^"']+\.m3u8[^"']*)["']/gi)) {
     found.add(m[1]);
+  }
+
+  // Pattern 6: setAttribute / setup calls — .setAttribute("src","URL") or setup({src:"URL"})
+  for (const m of html.matchAll(/(?:src|file|hls|url)\s*[=:,]\s*["'`]([^"'`]+\.(?:m3u8|mp4)[^"'`]*)["'`]/gi)) {
+    if (/^https?:/.test(m[1])) found.add(m[1]);
+  }
+
+  // Pattern 7: data-src / data-file / data-url attributes
+  for (const m of html.matchAll(/data-(?:src|file|url|hls)\s*=\s*["']([^"']+)["']/gi)) {
+    if (/\.(m3u8|mp4)/i.test(m[1]) && /^https?:/.test(m[1])) found.add(m[1]);
   }
 
   const all = [...found];
