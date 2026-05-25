@@ -935,7 +935,7 @@
 </div>
 
 <!-- Hidden video for Three.js -->
-<video id="bg-video" style="display:none" crossorigin="anonymous" playsinline webkit-playsinline loop></video>
+<video id="bg-video" style="display:none" playsinline webkit-playsinline loop></video>
 
 <script>
 /* ═══════════════════════════════════════════════
@@ -1073,19 +1073,16 @@ function detectURL(raw) {
    Smart Video Extractor — fetch webpage, find video URLs
 ═══════════════════════════════════════════════ */
 async function extractVideoFromPage(pageUrl) {
+  // Verified working proxies (tested 2026-05-25)
+  // allorigins/get: ~4s, returns JSON {contents:"..."}
+  // codetabs/?quest= (trailing slash): ~3s, returns raw HTML with CORS
   const proxyBuilders = [
-    u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
-    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-    u => `https://thingproxy.freeboard.io/fetch/${u}`,
+    u => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(u)}`,
   ];
 
   const tryProxy = async (build) => {
-    const res = await fetch(build(pageUrl), {
-      signal: AbortSignal.timeout(14000),
-      headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1' }
-    });
+    const res = await fetch(build(pageUrl), { signal: AbortSignal.timeout(15000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const text = await res.text();
     let content = text;
@@ -1095,20 +1092,11 @@ async function extractVideoFromPage(pageUrl) {
   };
 
   let html = '';
-  // Try all proxies in parallel, take the first that succeeds
+  // Try both proxies in parallel, take whichever succeeds first
   try {
     html = await Promise.any(proxyBuilders.map(b => tryProxy(b)));
   } catch {
-    // All failed — try sequential with longer timeout as last resort
-    for (const b of proxyBuilders) {
-      try {
-        const res = await fetch(b(pageUrl), { signal: AbortSignal.timeout(18000) });
-        if (!res.ok) continue;
-        const text = await res.text();
-        try { const j = JSON.parse(text); html = j.contents || j.html || text; } catch { html = text; }
-        if (html.length > 500) break;
-      } catch {}
-    }
+    html = '';
   }
   if (!html) return [];
 
