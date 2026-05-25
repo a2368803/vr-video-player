@@ -935,7 +935,7 @@
 </div>
 
 <!-- Hidden video for Three.js -->
-<video id="bg-video" style="display:none" playsinline webkit-playsinline loop></video>
+<video id="bg-video" style="display:none" crossorigin="anonymous" playsinline webkit-playsinline loop></video>
 
 <script>
 /* ═══════════════════════════════════════════════
@@ -1067,6 +1067,47 @@ function detectURL(raw) {
   } catch {
     return null;
   }
+}
+
+/* ═══════════════════════════════════════════════
+   HLS CORS Proxy — rewrite m3u8 so all segment/key
+   requests go through codetabs (which adds CORS headers)
+═══════════════════════════════════════════════ */
+const CORS_PROXY = 'https://api.codetabs.com/v1/proxy/?quest=';
+
+async function getPlayableHlsUrl(m3u8Url) {
+  // Quick test: can we load this m3u8 with CORS from our origin?
+  try {
+    const t = await fetch(m3u8Url, { method: 'HEAD', mode: 'cors', signal: AbortSignal.timeout(3000) });
+    if (t.ok) return m3u8Url; // CDN allows our origin — use directly
+  } catch {}
+
+  // CDN only allows jable.tv origin (or no CORS at all) — proxy everything
+  const base = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
+  const res = await fetch(CORS_PROXY + encodeURIComponent(m3u8Url), { signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error('proxy failed');
+  const text = await res.text();
+
+  const rewritten = text.split('\n').map(line => {
+    const t = line.trim();
+    if (!t) return line;
+    if (t.startsWith('#EXT-X-KEY')) {
+      // Rewrite URI="..." inside key tag
+      return line.replace(/URI="([^"]+)"/, (_, uri) => {
+        const abs = uri.startsWith('http') ? uri : base + uri;
+        return `URI="${CORS_PROXY}${encodeURIComponent(abs)}"`;
+      });
+    }
+    if (!t.startsWith('#')) {
+      // Segment line — rewrite to proxy URL
+      const abs = t.startsWith('http') ? t : base + t;
+      return CORS_PROXY + encodeURIComponent(abs);
+    }
+    return line;
+  }).join('\n');
+
+  // Return as blob: URL (same-origin, so crossorigin="anonymous" works)
+  return URL.createObjectURL(new Blob([rewritten], { type: 'application/x-mpegurl' }));
 }
 
 /* ═══════════════════════════════════════════════
@@ -1235,11 +1276,19 @@ async function loadVideo() {
 
     // Use first (best) video URL found
     const foundUrl = videos[0];
-    S.url = foundUrl;
     S.source = 'direct';
     S.ytId = '';
+    S._isHLS = foundUrl.includes('.m3u8');
 
-    sourceLabel.textContent = foundUrl.includes('.m3u8') ? 'HLS 串流' : 'MP4';
+    // Resolve a CORS-safe playable URL (proxy if CDN blocks our origin)
+    let playUrl = foundUrl;
+    if (S._isHLS) {
+      loadingEl.querySelector('.loading-text').textContent = '準備串流...';
+      try { playUrl = await getPlayableHlsUrl(foundUrl); } catch {}
+    }
+    S.url = playUrl;
+
+    sourceLabel.textContent = S._isHLS ? 'HLS 串流' : 'MP4';
     const v = document.createElement('video');
     v.controls = true;
     v.muted = true;
@@ -1247,12 +1296,12 @@ async function loadVideo() {
     v.setAttribute('playsinline', '');
     v.setAttribute('webkit-playsinline', '');
 
-    if (foundUrl.includes('.m3u8') && window.Hls && Hls.isSupported()) {
+    if (S._isHLS && window.Hls && Hls.isSupported()) {
       const hls = new Hls();
-      hls.loadSource(foundUrl);
+      hls.loadSource(playUrl);
       hls.attachMedia(v);
     } else {
-      v.src = foundUrl;
+      v.src = playUrl;
     }
 
     v.addEventListener('error', () => {
@@ -1418,19 +1467,22 @@ function buildThreeVR() {
 
   // Video setup
   bgVideo.src = '';
+  bgVideo.crossOrigin = 'anonymous';
   if (S.hlsInstance) { S.hlsInstance.destroy(); S.hlsInstance = null; }
 
   const url = S.url;
-  const isHLS = url.includes('.m3u8');
+  // url may be blob: (proxied m3u8) or original URL
+  const isHLS = S._isHLS || url.includes('.m3u8');
+  const isBlob = url.startsWith('blob:');
 
-  if (isHLS && window.Hls && Hls.isSupported()) {
+  if (isHLS && !isBlob && window.Hls && Hls.isSupported()) {
+    // Direct URL with CORS — hls.js handles segments
     hlsObj = new Hls();
     hlsObj.loadSource(url);
     hlsObj.attachMedia(bgVideo);
     S.hlsInstance = hlsObj;
-  } else if (isHLS && bgVideo.canPlayType('application/vnd.apple.mpegurl')) {
-    bgVideo.src = url; // Native HLS on Safari
   } else {
+    // Blob URL (proxied m3u8) or native HLS or MP4
     bgVideo.src = url;
   }
 
