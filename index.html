@@ -1075,6 +1075,23 @@ function detectURL(raw) {
 ═══════════════════════════════════════════════ */
 const CORS_PROXY = 'https://api.cors.lol/?url=';
 
+// Free CORS proxies are flaky/rate-limited — retry a few times with a
+// short delay before giving up, instead of failing on the first hiccup.
+async function fetchWithRetry(url, opts = {}, retries = 3, delayMs = 800) {
+  let lastErr;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(url, opts);
+      if (res.ok) return res;
+      lastErr = new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      lastErr = e;
+    }
+    if (i < retries - 1) await new Promise(r => setTimeout(r, delayMs));
+  }
+  throw lastErr;
+}
+
 async function getPlayableHlsUrl(m3u8Url) {
   // Quick test: can we load this m3u8 with CORS from our origin?
   try {
@@ -1084,8 +1101,7 @@ async function getPlayableHlsUrl(m3u8Url) {
 
   // CDN only allows jable.tv origin (or no CORS at all) — proxy everything
   const base = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
-  const res = await fetch(CORS_PROXY + encodeURIComponent(m3u8Url), { signal: AbortSignal.timeout(15000) });
-  if (!res.ok) throw new Error('proxy failed');
+  const res = await fetchWithRetry(CORS_PROXY + encodeURIComponent(m3u8Url), { signal: AbortSignal.timeout(15000) });
   const text = await res.text();
 
   const rewritten = text.split('\n').map(line => {
@@ -1125,8 +1141,7 @@ async function extractVideoFromPage(pageUrl) {
   ];
 
   const tryProxy = async ({ url, headers }) => {
-    const res = await fetch(url(pageUrl), { headers, signal: AbortSignal.timeout(15000) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await fetchWithRetry(url(pageUrl), { headers, signal: AbortSignal.timeout(15000) }, 2, 1000);
     const text = await res.text();
     let content = text;
     try { const j = JSON.parse(text); content = j.contents || j.html || text; } catch {}
@@ -1135,11 +1150,15 @@ async function extractVideoFromPage(pageUrl) {
   };
 
   let html = '';
-  // Try all proxies in parallel, take whichever succeeds first
-  try {
-    html = await Promise.any(proxyBuilders.map(b => tryProxy(b)));
-  } catch {
-    html = '';
+  // Try all proxies in parallel (each with its own retries), take whichever succeeds first.
+  // If everything fails, retry the whole round once more after a short pause.
+  for (let attempt = 0; attempt < 2 && !html; attempt++) {
+    try {
+      html = await Promise.any(proxyBuilders.map(b => tryProxy(b)));
+    } catch {
+      html = '';
+      if (attempt === 0) await new Promise(r => setTimeout(r, 1200));
+    }
   }
   if (!html) return [];
 
@@ -1485,10 +1504,45 @@ function buildThreeVR() {
   const isHLS = S._isHLS || url.includes('.m3u8');
 
   if (isHLS && window.Hls && Hls.isSupported()) {
-    hlsObj = new Hls();
+    // The CORS proxy is flaky/rate-limited, so be generous with retries —
+    // without this, a single failed fragment/key fetch (e.g. right after
+    // a seek or pause) can leave playback permanently stuck.
+    hlsObj = new Hls({
+      manifestLoadingMaxRetry: 6,
+      manifestLoadingRetryDelay: 1000,
+      levelLoadingMaxRetry: 6,
+      levelLoadingRetryDelay: 1000,
+      fragLoadingMaxRetry: 8,
+      fragLoadingRetryDelay: 1000,
+      fragLoadingMaxRetryTimeout: 64000,
+    });
     hlsObj.loadSource(url);
     hlsObj.attachMedia(bgVideo);
     S.hlsInstance = hlsObj;
+
+    let mediaErrorRecoveries = 0;
+    hlsObj.on(Hls.Events.ERROR, (_evt, data) => {
+      if (!data.fatal) return;
+      switch (data.type) {
+        case Hls.ErrorTypes.NETWORK_ERROR:
+          hlsObj.startLoad();
+          break;
+        case Hls.ErrorTypes.MEDIA_ERROR:
+          if (mediaErrorRecoveries++ < 4) {
+            hlsObj.recoverMediaError();
+          } else {
+            hlsObj.destroy();
+            S.hlsInstance = null;
+            toast('影片播放發生錯誤，請重新載入');
+          }
+          break;
+        default:
+          hlsObj.destroy();
+          S.hlsInstance = null;
+          toast('影片播放發生錯誤，請重新載入');
+          break;
+      }
+    });
   } else {
     // Native HLS support or MP4
     bgVideo.src = url;
