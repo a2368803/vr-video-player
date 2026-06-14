@@ -1659,6 +1659,29 @@ function buildGeometry() {
   }
 }
 
+// On iOS, after a buffering stall the <video> element can resume playback
+// (currentTime advancing) while the WebGL texture stays stuck on the last
+// frame before the stall — showing a black/frozen screen. Recreating the
+// VideoTexture on resume forces a fresh frame grab and fixes this.
+let _bgVideoStalled = false;
+bgVideo.addEventListener('waiting', () => { _bgVideoStalled = true; });
+bgVideo.addEventListener('playing', () => {
+  if (!_bgVideoStalled || !videoTex || !scene3) return;
+  _bgVideoStalled = false;
+  const old = videoTex;
+  videoTex = new THREE.VideoTexture(bgVideo);
+  videoTex.minFilter = THREE.LinearFilter;
+  videoTex.magFilter = THREE.LinearFilter;
+  videoTex.format = THREE.RGBFormat;
+  scene3.traverse(obj => {
+    if (obj.isMesh && obj.material && obj.material.map === old) {
+      obj.material.map = videoTex;
+      obj.material.needsUpdate = true;
+    }
+  });
+  old.dispose();
+});
+
 function buildDistortionPasses(W, H) {
   // Render target — full screen
   rtTarget = new THREE.WebGLRenderTarget(W, H, {
