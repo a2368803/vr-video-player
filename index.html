@@ -1515,6 +1515,11 @@ function buildThreeVR() {
       fragLoadingMaxRetry: 8,
       fragLoadingRetryDelay: 1000,
       fragLoadingMaxRetryTimeout: 64000,
+      // The proxy adds latency per segment — buffer further ahead so
+      // those round-trips happen well before they're needed.
+      maxBufferLength: 60,
+      maxMaxBufferLength: 180,
+      maxBufferSize: 120 * 1000 * 1000,
     });
     hlsObj.loadSource(url);
     hlsObj.attachMedia(bgVideo);
