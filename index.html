@@ -1895,6 +1895,46 @@ function handleOrientation(e) {
   S.orient.alpha = e.alpha || 0;
   S.orient.beta  = e.beta  || 0;
   S.orient.gamma = e.gamma || 0;
+  checkHeadFlick(S.orient.alpha);
+}
+
+/* ── Head-flick gesture: quick double turn left/right snaps view ±45°.
+   Lets you re-aim without taking the phone out of the VR headset. ── */
+let _flickLastAlpha    = null;
+let _flickLastTime     = 0;
+let _flickPendingDir   = 0;
+let _flickPendingTime  = 0;
+let _flickCooldownUntil = 0;
+
+function checkHeadFlick(alpha) {
+  const now = performance.now();
+  if (_flickLastAlpha !== null) {
+    const dt = now - _flickLastTime;
+    if (dt > 0 && dt < 100) {
+      let d = alpha - _flickLastAlpha;
+      d = ((d + 540) % 360) - 180; // normalize to (-180, 180]
+      const speed = d / dt; // deg per ms
+
+      const FLICK_SPEED = 0.6;      // ~600 deg/sec — a quick head snap
+      const DOUBLE_WINDOW = 700;    // ms between the two flicks
+      const COOLDOWN = 600;         // ms after a successful snap
+
+      if (Math.abs(speed) > FLICK_SPEED && now > _flickCooldownUntil) {
+        const dir = speed > 0 ? 1 : -1;
+        if (_flickPendingDir === dir && (now - _flickPendingTime) < DOUBLE_WINDOW) {
+          userYaw += dir * 45;
+          _flickPendingDir = 0;
+          _flickCooldownUntil = now + COOLDOWN;
+          toast(dir > 0 ? '↻ 視角右轉 45°' : '↺ 視角左轉 45°', 1000);
+        } else {
+          _flickPendingDir = dir;
+          _flickPendingTime = now;
+        }
+      }
+    }
+  }
+  _flickLastAlpha = alpha;
+  _flickLastTime = now;
 }
 
 async function requestGyro() {
