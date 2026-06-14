@@ -1480,18 +1480,17 @@ function buildThreeVR() {
   if (S.hlsInstance) { S.hlsInstance.destroy(); S.hlsInstance = null; }
 
   const url = S.url;
-  // url may be blob: (proxied m3u8) or original URL
+  // url may be blob: (proxied m3u8) or original URL — hls.js can fetch
+  // and parse blob: URLs fine, so it's used for both cases.
   const isHLS = S._isHLS || url.includes('.m3u8');
-  const isBlob = url.startsWith('blob:');
 
-  if (isHLS && !isBlob && window.Hls && Hls.isSupported()) {
-    // Direct URL with CORS — hls.js handles segments
+  if (isHLS && window.Hls && Hls.isSupported()) {
     hlsObj = new Hls();
     hlsObj.loadSource(url);
     hlsObj.attachMedia(bgVideo);
     S.hlsInstance = hlsObj;
   } else {
-    // Blob URL (proxied m3u8) or native HLS or MP4
+    // Native HLS support or MP4
     bgVideo.src = url;
   }
 
