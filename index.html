@@ -881,10 +881,10 @@
 
   <div class="setting-row">
     <div>
-      <div class="setting-label">鏡頭桶形失真校正</div>
-      <div class="setting-hint">補償 VR 盒子鏡頭失真（僅限直接影片）</div>
+      <div class="setting-label">甩頭追蹤視角</div>
+      <div class="setting-hint">快速甩頭兩下可旋轉視角45°；第一人稱影片建議關閉，避免角度被誤觸轉動</div>
     </div>
-    <button class="toggle on" id="distort-toggle"></button>
+    <button class="toggle on" id="headflick-toggle"></button>
   </div>
 
   <div class="iod-row">
@@ -947,7 +947,7 @@ const S = {
   source: 'youtube', // youtube | vimeo | direct
   ytId: '',
   useGyro: true,
-  useDistort: true,
+  useHeadFlick: true,
   iod: 64,           // mm
   gyroActive: false,
   orient: { alpha: 0, beta: 90, gamma: 0 },
@@ -973,7 +973,7 @@ const vrCanvas       = $('vr-canvas');
 const bgVideo        = $('bg-video');
 const vrHud          = $('vr-hud');
 const gyroToggle     = $('gyro-toggle');
-const distortToggle  = $('distort-toggle');
+const headFlickToggle = $('headflick-toggle');
 const iodSlider      = $('iod-slider');
 const iodVal         = $('iod-val');
 const loadingEl      = $('loading');
@@ -1425,9 +1425,9 @@ gyroToggle.addEventListener('click', () => {
   S.useGyro = !S.useGyro;
   gyroToggle.classList.toggle('on', S.useGyro);
 });
-distortToggle.addEventListener('click', () => {
-  S.useDistort = !S.useDistort;
-  distortToggle.classList.toggle('on', S.useDistort);
+headFlickToggle.addEventListener('click', () => {
+  S.useHeadFlick = !S.useHeadFlick;
+  headFlickToggle.classList.toggle('on', S.useHeadFlick);
 });
 iodSlider.addEventListener('input', () => {
   S.iod = +iodSlider.value;
@@ -1442,34 +1442,6 @@ let videoTex, hlsObj;
 let rafId;
 let userYaw = 0, userPitch = 0;
 let dragState = null;
-
-// Barrel distortion post-processing
-let rtScene, rtCam, rtTarget, rtLeft, rtRight, distortL, distortR;
-
-const BARREL_VS = `
-varying vec2 vUv;
-void main() {
-  vUv = uv;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}`;
-
-const BARREL_FS = `
-uniform sampler2D tDiffuse;
-uniform vec2 center;
-uniform float k1;
-uniform float k2;
-varying vec2 vUv;
-void main() {
-  vec2 uv = vUv - center;
-  float r2 = dot(uv, uv);
-  vec2 d = uv * (1.0 + k1 * r2 + k2 * r2 * r2);
-  vec2 final = d + center;
-  if (final.x < 0.0 || final.x > 1.0 || final.y < 0.0 || final.y > 1.0) {
-    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-  } else {
-    gl_FragColor = texture2D(tDiffuse, final);
-  }
-}`;
 
 function buildThreeVR() {
   const W = window.innerWidth, H = window.innerHeight;
@@ -1568,9 +1540,6 @@ function buildThreeVR() {
   videoTex.format = THREE.RGBFormat;
 
   buildGeometry();
-
-  // Distortion setup
-  if (S.useDistort) buildDistortionPasses(W, H);
 
   vrCanvas.style.display = 'block';
   ytVrWrap.classList.remove('active');
@@ -1682,47 +1651,6 @@ bgVideo.addEventListener('playing', () => {
   old.dispose();
 });
 
-function buildDistortionPasses(W, H) {
-  // Render target — full screen
-  rtTarget = new THREE.WebGLRenderTarget(W, H, {
-    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter
-  });
-
-  // Post-processing scene (flat quad)
-  rtScene = new THREE.Scene();
-  rtCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-
-  const k1 = 0.22, k2 = 0.08;
-
-  // Left eye quad
-  const geoL = new THREE.PlaneGeometry(1, 2);
-  distortL = new THREE.Mesh(geoL, new THREE.ShaderMaterial({
-    uniforms: {
-      tDiffuse: { value: rtTarget.texture },
-      center:   { value: new THREE.Vector2(0.25, 0.5) },
-      k1: { value: k1 }, k2: { value: k2 }
-    },
-    vertexShader: BARREL_VS,
-    fragmentShader: BARREL_FS
-  }));
-  distortL.position.x = -0.5;
-  rtScene.add(distortL);
-
-  // Right eye quad
-  const geoR = new THREE.PlaneGeometry(1, 2);
-  distortR = new THREE.Mesh(geoR, new THREE.ShaderMaterial({
-    uniforms: {
-      tDiffuse: { value: rtTarget.texture },
-      center:   { value: new THREE.Vector2(0.75, 0.5) },
-      k1: { value: k1 }, k2: { value: k2 }
-    },
-    vertexShader: BARREL_VS,
-    fragmentShader: BARREL_FS
-  }));
-  distortR.position.x = 0.5;
-  rtScene.add(distortR);
-}
-
 const _q  = new THREE.Quaternion();
 const _q0 = new THREE.Quaternion();
 const _q1 = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);
@@ -1802,49 +1730,21 @@ function renderLoop() {
   // UV offsets for SBS / TB
   const mesh = scene3.children.find(c => c.isMesh);
 
-  if (S.useDistort && rtTarget) {
-    // Render both eyes into full render target, then apply distortion
-    renderer3.setRenderTarget(rtTarget);
-    renderer3.setScissorTest(true);
+  renderer3.setRenderTarget(null);
+  renderer3.setScissorTest(true);
 
-    // Left
-    renderer3.setScissor(0, 0, eyeW, H);
-    renderer3.setViewport(0, 0, eyeW, H);
-    if (mesh && S.mode === 'sbs') setUV(mesh, 0, 0, 0.5, 1);
-    else if (mesh && S.mode === 'tb') setUV(mesh, 0, 0.5, 1, 0.5);
-    renderer3.render(scene3, camL);
+  renderer3.setScissor(0, 0, eyeW, H);
+  renderer3.setViewport(0, 0, eyeW, H);
+  if (mesh && S.mode === 'sbs') setUV(mesh, 0, 0, 0.5, 1);
+  else if (mesh && S.mode === 'tb') setUV(mesh, 0, 0.5, 1, 0.5);
+  renderer3.render(scene3, camL);
 
-    // Right
-    renderer3.setScissor(eyeW, 0, eyeW, H);
-    renderer3.setViewport(eyeW, 0, eyeW, H);
-    if (mesh && S.mode === 'sbs') setUV(mesh, 0.5, 0, 0.5, 1);
-    else if (mesh && S.mode === 'tb') setUV(mesh, 0, 0, 1, 0.5);
-    else if (mesh) resetUV(mesh);
-    renderer3.render(scene3, camR);
-
-    // Apply barrel distortion
-    renderer3.setRenderTarget(null);
-    renderer3.setScissorTest(false);
-    renderer3.setViewport(0, 0, W, H);
-    renderer3.render(rtScene, rtCam);
-
-  } else {
-    renderer3.setRenderTarget(null);
-    renderer3.setScissorTest(true);
-
-    renderer3.setScissor(0, 0, eyeW, H);
-    renderer3.setViewport(0, 0, eyeW, H);
-    if (mesh && S.mode === 'sbs') setUV(mesh, 0, 0, 0.5, 1);
-    else if (mesh && S.mode === 'tb') setUV(mesh, 0, 0.5, 1, 0.5);
-    renderer3.render(scene3, camL);
-
-    renderer3.setScissor(eyeW, 0, eyeW, H);
-    renderer3.setViewport(eyeW, 0, eyeW, H);
-    if (mesh && S.mode === 'sbs') setUV(mesh, 0.5, 0, 0.5, 1);
-    else if (mesh && S.mode === 'tb') setUV(mesh, 0, 0, 1, 0.5);
-    else if (mesh) resetUV(mesh);
-    renderer3.render(scene3, camR);
-  }
+  renderer3.setScissor(eyeW, 0, eyeW, H);
+  renderer3.setViewport(eyeW, 0, eyeW, H);
+  if (mesh && S.mode === 'sbs') setUV(mesh, 0.5, 0, 0.5, 1);
+  else if (mesh && S.mode === 'tb') setUV(mesh, 0, 0, 1, 0.5);
+  else if (mesh) resetUV(mesh);
+  renderer3.render(scene3, camR);
 }
 
 function setUV(mesh, ox, oy, rx, ry) {
@@ -1907,6 +1807,7 @@ let _flickPendingTime  = 0;
 let _flickCooldownUntil = 0;
 
 function checkHeadFlick(alpha) {
+  if (!S.useHeadFlick) return;
   const now = performance.now();
   if (_flickLastAlpha !== null) {
     const dt = now - _flickLastTime;
@@ -2009,7 +1910,6 @@ function exitVR() {
 
   if (renderer3) { renderer3.dispose(); renderer3 = null; }
   if (videoTex)  { videoTex.dispose(); videoTex = null; }
-  if (rtTarget)  { rtTarget.dispose(); rtTarget = null; }
 
   try { if (document.exitFullscreen) document.exitFullscreen(); } catch {}
   try { if (screen.orientation?.unlock) screen.orientation.unlock(); } catch {}
@@ -2240,9 +2140,6 @@ window.addEventListener('resize', () => {
   if (!renderer3) return;
   const W = window.innerWidth, H = window.innerHeight;
   renderer3.setSize(W, H);
-  if (rtTarget) {
-    rtTarget.setSize(W, H);
-  }
 });
 
 /* ═══════════════════════════════════════════════
